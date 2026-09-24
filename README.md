@@ -4,10 +4,16 @@
 [![coverage](https://img.shields.io/badge/analytics%20coverage-97%25-brightgreen)](#tests)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://www.python.org/)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![release](https://img.shields.io/github/v/release/Tejas12972/stockwatchlist)](https://github.com/Tejas12972/stockwatchlist/releases)
 
-A personal options-analytics tool. Option chains with **Black-Scholes greeks and
-implied volatility computed locally**, and an IV-rank history the tool builds
-itself by snapshotting chains daily.
+A full-stack options-analytics platform. It pulls live option prices, then
+**computes implied volatility and every greek itself** with a Black-Scholes
+pricer and a numerical solver written from scratch. It also builds its own
+volatility history by snapshotting the market every day, because that history
+can't be downloaded for free anywhere.
+
+**Python · FastAPI · SQLAlchemy · NumPy/pandas · Next.js 15 · React 19 ·
+TypeScript · Docker · Fly.io · GitHub Actions**
 
 ![Option chain with self-computed greeks, and IV rank honestly reporting insufficient history](docs/images/chain.png)
 
@@ -18,6 +24,73 @@ was computed here rather than read from the data vendor. And the IV-rank panel
 says **"insufficient history (1/20 days)"** instead of showing a number — because
 on day one there is no honest rank to show, and a zero would read as "volatility
 is at its lows".
+
+---
+
+## At a glance
+
+### What it does
+
+- **Live option chains with computed analytics.** Pick a ticker and expiry and
+  get every strike's implied volatility, delta, gamma, vega and theta. All of it
+  is derived here from the raw bid/ask prices, never copied from the vendor.
+- **An IV history the tool builds for itself.** A scheduled job snapshots the
+  full chain every trading day into a database. That history is what makes
+  **IV rank and IV percentile** possible, a question free data sources can't
+  answer.
+- **A multi-leg spread builder.** Combine calls and puts into spreads or
+  condors and see profit/loss at expiry and today, with max profit, max loss
+  and breakevens computed exactly.
+- **A screener and CSV export.** It flags watchlist symbols whose IV rank,
+  volume or open interest is unusual against their own history, and exports
+  everything to spreadsheets.
+- **Three ways to use it:** a web dashboard, a REST API with interactive docs,
+  and a command-line tool.
+
+| Watchlist | Option chain | Spread builder |
+|---|---|---|
+| ![Watchlist with accumulated history per symbol](docs/images/watchlist.png) | ![Option chain with self-computed greeks](docs/images/chain.png) | ![Spread builder P/L chart](docs/images/payoff.png) |
+
+### Engineering highlights
+
+| | |
+|---|---|
+| **Numerical methods** | A Newton-Raphson IV solver with a bisection fallback for the cases where Newton diverges. Round-trip error is under 4×10⁻⁹ across volatilities from 0.01% to 500%. |
+| **Correctness over plausibility** | Every edge case (expired, stale quote, arbitrage-violating price) returns an empty value with a named reason, never a made-up number. The UI shows the reason. |
+| **Testing** | 548 Python and 48 TypeScript tests. 97% coverage on the analytics core, gated in CI. The Python suite **can't touch the network**: sockets are blocked and a test proves the block is in place. |
+| **Cross-language consistency** | The payoff engine exists in Python and in TypeScript, for instant redraws in the browser. Both are tested against one shared golden file, so CI fails if they ever disagree. |
+| **Data integrity** | Daily snapshots can be re-run safely. Database-level unique constraints plus `INSERT … ON CONFLICT DO UPDATE` mean a retried job refreshes the day instead of duplicating it. |
+| **Type safety** | `mypy --strict` on the analytics package and strict TypeScript on the front end. Vendor-supplied greeks are shut out by construction: the data types have no field to hold one. |
+| **Security-minded deployment** | The API has **no public address**. It is reachable only over a private network, through one authenticated front end. One auth check covers everything, and CORS stops being a problem. |
+| **Resilience** | The data vendor is behind a provider interface, so an offline replay provider keeps the app and the tests working when Yahoo rate-limits. The scheduler catches up on start if it missed a day. |
+
+### Architecture
+
+```
+  Browser ──HTTPS──▶  Next.js 15 (React 19, TypeScript, Tailwind, Recharts)
+                        │  HTTP Basic auth on every route
+                        │  server-side proxy, private network only
+                        ▼
+                      FastAPI ──────▶ analytics/   pure functions, no I/O
+                        │               Black-Scholes, IV solver, IV rank,
+                        │               payoff engine, screener
+                        │
+                        ├──▶ providers/  yfinance (live) │ fixture (offline replay)
+                        │
+                        └──▶ SQLite via SQLAlchemy 2 + Alembic
+                               daily chain snapshots → the IV history
+                               written by an in-process scheduler at 21:15 UTC
+```
+
+| Layer | Stack |
+|---|---|
+| Analytics | Python 3.11+, NumPy, pandas, all pricing and solving written from scratch |
+| Backend | FastAPI, Pydantic v2, SQLAlchemy 2, Alembic, Uvicorn |
+| Front end | Next.js 15 (App Router), React 19, TypeScript, Tailwind CSS 4, Recharts |
+| Testing | pytest, pytest-socket, pytest-cov, Vitest, Ruff, mypy |
+| Ops | Docker, docker-compose, nginx, systemd timer, Fly.io, GitHub Actions CI |
+
+About 5,200 lines of Python and 2,400 lines of TypeScript.
 
 ---
 
@@ -269,7 +342,7 @@ cannot be priced is information, so it is shown rather than dropped.
 
 ## Tests
 
-547 Python tests and 48 TypeScript tests. **The Python suite runs with no network at all**, which is enforced rather
+548 Python tests and 48 TypeScript tests. **The Python suite runs with no network at all**, which is enforced rather
 than intended: `pytest-socket` is configured with `--disable-socket`, so any
 accidental outbound call fails the test that made it. `tests/test_offline.py`
 asserts the block is actually in place, so the guarantee cannot rot quietly if
