@@ -128,14 +128,14 @@ class TestIdempotency:
     def test_two_snapshots_for_one_ticker_on_one_day_are_rejected(
         self, session: Session, provider: FixtureProvider
     ) -> None:
-        run(session, provider)
+        result = run(session, provider)
         ticker = session.scalar(select(Ticker).where(Ticker.symbol == "AAPL"))
         assert ticker is not None
 
         session.add(
             Snapshot(
                 ticker_id=ticker.id,
-                snapshot_date=market_date(),
+                snapshot_date=result.snapshot_date,
                 as_of=datetime.now(UTC),
                 provider="fixture",
                 spot=1.0,
@@ -235,6 +235,22 @@ class TestWhatIsStored:
         result = run(session, provider)
         assert result.atm_iv_30d is not None
         assert 0.01 < result.atm_iv_30d < 3.0
+
+    def test_the_clock_comes_from_the_data_not_the_wall(
+        self, session: Session, provider: FixtureProvider
+    ) -> None:
+        """A replayed capture is priced, and filed, as of the moment it was captured.
+
+        Pricing it against today instead ages every option past its quote; once
+        the capture's front expiry is behind us the 30-day point stops being
+        bracketed and this suite would start failing on the calendar alone.
+        """
+        result = run(session, provider)
+        snapshot = latest_snapshot(session, "AAPL")
+        assert snapshot is not None
+        assert result.snapshot_date == market_date(provider.captured_at)
+        assert snapshot.as_of.replace(tzinfo=UTC) == provider.captured_at
+        assert result.atm_iv_30d is not None
 
     def test_no_nan_reaches_the_database(self, session: Session, provider: FixtureProvider) -> None:
         """pandas NA is not a SQLite value; it must be normalised to NULL."""

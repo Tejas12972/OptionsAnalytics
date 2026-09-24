@@ -82,10 +82,18 @@ def snapshot_ticker(
     max_expiries: int = DEFAULT_MAX_EXPIRIES,
     as_of: datetime | None = None,
 ) -> SnapshotResult:
-    """Capture one ticker's chains for one day. Safe to run more than once a day."""
-    as_of = as_of or datetime.now(UTC)
-    snapshot_date = market_date(as_of)
-    result = SnapshotResult(ticker=symbol.upper(), snapshot_date=snapshot_date)
+    """Capture one ticker's chains for one day. Safe to run more than once a day.
+
+    Without an explicit `as_of`, the clock comes from the data -- each chain's own
+    `as_of` -- not from the wall clock. Prices and time-to-expiry must describe
+    the same instant: pricing a replayed capture against today's date solves IV
+    for an option days older than its quote, and files it under the wrong day.
+    For a live provider the two are the same moment anyway.
+    """
+    snapshot_as_of = as_of
+    result = SnapshotResult(
+        ticker=symbol.upper(), snapshot_date=market_date(as_of or datetime.now(UTC))
+    )
 
     ticker = get_or_create_ticker(session, symbol)
     expiries = provider.get_expiries(symbol)[:max_expiries]
@@ -106,9 +114,12 @@ def snapshot_ticker(
             result.errors.append(f"{expiry}: {exc}")
             continue
 
-        frame = build_chain_frame(chain, risk_free_rate, dividend_yield, as_of)
+        pricing_as_of = as_of or chain.as_of
+        frame = build_chain_frame(chain, risk_free_rate, dividend_yield, pricing_as_of)
         if frame.empty:
             continue
+
+        snapshot_as_of = snapshot_as_of or pricing_as_of
 
         frames.append(frame)
         result.expiries.append(expiry)
@@ -118,8 +129,11 @@ def snapshot_ticker(
         if atm is not None:
             atm_by_maturity[float(frame.attrs["time_to_expiry"])] = atm
 
-    if not frames or spot is None:
+    if not frames or spot is None or snapshot_as_of is None:
         raise ProviderError(f"{symbol}: every expiry failed; nothing to snapshot")
+
+    snapshot_date = market_date(snapshot_as_of)
+    result.snapshot_date = snapshot_date
 
     combined = pd.concat(frames, ignore_index=True)
     result.contracts_written = len(combined)
@@ -131,7 +145,7 @@ def snapshot_ticker(
         session,
         ticker_id=ticker.id,
         snapshot_date=snapshot_date,
-        as_of=as_of,
+        as_of=snapshot_as_of,
         provider_name=provider.name,
         spot=spot,
         risk_free_rate=risk_free_rate,
